@@ -1,0 +1,26 @@
+meta {
+  name: Validator upstream reachability
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{convexBaseUrl}}/
+  body: json
+}
+
+headers {
+  content-type: application/json
+}
+
+body:json {
+  {
+    "token": "{{apiToken}}"
+  }
+}
+
+tests {
+  test("upstream responds", function () {
+    expect([200, 404, 500]).to.include(res.status);
+  });
+}

@@ -1,0 +1,20 @@
+meta {
+  name: Missing bearer header
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/v1/chat/completions
+  body: none
+}
+
+settings {
+  followRedirects: false
+}
+
+tests {
+  test("header validation fails without bearer", function () {
+    expect([400, 401, 422]).to.include(res.status);
+  });
+}
