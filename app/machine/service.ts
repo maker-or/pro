@@ -84,6 +84,8 @@ export abstract class MachineService {
       providerurl: string;
       providerkey: string;
       messages: unknown[];
+      stream: boolean;
+      streamOptions?: unknown;
     },
     BodyParseError
   > {
@@ -117,6 +119,8 @@ export abstract class MachineService {
         providerurl: provider.base_url,
         providerkey: provider.api_key,
         messages: (b.messages ?? []) as unknown[],
+        stream: b.stream === true,
+        streamOptions: b.stream_options,
       };
     });
   }
@@ -126,6 +130,9 @@ export abstract class MachineService {
     headers: BearerHeaders,
     body: unknown,
   ): Effect.Effect<Response, MachineError> {
+    console.log("this is before doing any thing to the headers", headers);
+    console.log("this is before doing any thing to the body", body);
+
     return Effect.gen(function* () {
       yield* MachineService.validateToken(headers); // Step 1
       const resolved = yield* MachineService.resolveBody(body); // Step 2
@@ -140,6 +147,8 @@ export abstract class MachineService {
     providerurl: string;
     providerkey: string;
     messages: unknown[];
+    stream: boolean;
+    streamOptions?: unknown;
   }): Effect.Effect<Response, NetworkError | UpstreamError | RateLimitError> {
     return Effect.gen(function* () {
       Console.log("the request is about to start ");
@@ -156,6 +165,10 @@ export abstract class MachineService {
             body: JSON.stringify({
               model: body.model,
               messages: body.messages,
+              stream: body.stream,
+              ...(body.streamOptions !== undefined
+                ? { stream_options: body.streamOptions }
+                : {}),
             }),
           }),
 
@@ -192,7 +205,10 @@ export abstract class MachineService {
       passthroughHeaders.set("cache-control", "no-cache");
       if (requestId) passthroughHeaders.set("x-request-id", requestId);
 
-      return new Response(res.body);
+      return new Response(res.body, {
+        status: res.status,
+        headers: passthroughHeaders,
+      });
     });
   }
 }
