@@ -67,7 +67,6 @@ export const listApiKeys = query({
 
 export const publicaction = httpAction(async (ctx, request) => {
   const payload = await request.json();
-  console.log(payload);
 
   // Extract publicId from the full API key token.
   // Token format: sk_live_{publicId}_{secret}
@@ -76,13 +75,16 @@ export const publicaction = httpAction(async (ctx, request) => {
   const parts = rawToken.split("_");
   const publicId = parts.length >= 3 ? parts[2] : rawToken;
   const hashedKey = parts.length >= 4 ? parts[3] : "";
-  console.log(publicId);
 
   const response = await ctx.runQuery(internal.secert.verifyApiKey, {
     token: publicId,
     hashedKey: hashedKey,
   });
-  return new Response(JSON.stringify(response), { status: 200 });
+
+  return new Response(JSON.stringify(response), {
+    status: response.valid ? 200 : 401,
+    headers: { "content-type": "application/json" },
+  });
 });
 
 export const verifyApiKey = internalQuery({

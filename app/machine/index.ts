@@ -1,4 +1,4 @@
-import { Effect, Logger } from "effect";
+import { Effect } from "effect";
 import { Elysia } from "elysia";
 import type { OpenAIErrorBody } from "./model";
 import { MachineModel } from "./model";

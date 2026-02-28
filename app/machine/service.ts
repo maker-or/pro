@@ -1,11 +1,11 @@
+import axios from "axios";
 import { Data, Effect, Schedule } from "effect";
-import { modelRegister } from "../../model_register";
-import type { BearerHeaders, ModelObject } from "./model";
-import { logs } from "@opentelemetry/api-logs";
 import { SpanStatusCode, trace } from "@opentelemetry/api";
+import { logs } from "@opentelemetry/api-logs";
+import { modelRegister } from "../../model_register";
 import { providers } from "./provider";
+import type { BearerHeaders, ModelObject } from "./model";
 
-// --- Typed errors ---
 class MissingAuthHeader extends Data.TaggedError("MissingAuthHeader")<{}> {}
 class NetworkError extends Data.TaggedError("NetworkError")<{
   cause: unknown;
@@ -32,13 +32,31 @@ export type MachineError =
   | BodyParseError
   | UpstreamError
   | RateLimitError;
+
 const logger = logs.getLogger("my-app");
 const tracer = trace.getTracer("machine-service", "1.0.0");
 
 const INFO_SEVERITY_NUMBER = 9;
 const WARN_SEVERITY_NUMBER = 13;
 const ERROR_SEVERITY_NUMBER = 17;
-const NON_CRITICAL_SAMPLE_PERCENT = 2;
+
+type CanonicalContext = {
+  requestId: string;
+  traceId?: string;
+  startedAt: number;
+  outcome: "success" | "error";
+  httpStatus?: number;
+  errorType?: MachineError["_tag"];
+  errorMessage?: string;
+  tokenValidationStatus?: number;
+  tokenValid?: boolean;
+  modelId?: string;
+  upstreamModel?: string;
+  provider?: string;
+  providerHost?: string;
+  upstreamStatus?: number;
+  stream?: boolean;
+};
 
 function hashString(value: string): number {
   let hash = 0;
@@ -48,47 +66,99 @@ function hashString(value: string): number {
   return hash;
 }
 
-function shouldSampleNonCritical(seed?: string): boolean {
-  if (!seed) return Math.random() * 100 < NON_CRITICAL_SAMPLE_PERCENT;
-  return hashString(seed) % 100 < NON_CRITICAL_SAMPLE_PERCENT;
+function failureLevel(tag: MachineError["_tag"]): "warn" | "error" {
+  if (
+    tag === "MissingAuthHeader" ||
+    tag === "TokenValidationError" ||
+    tag === "BodyParseError" ||
+    tag === "NetworkError" ||
+    tag === "RateLimitError"
+  ) {
+    return "warn";
+  }
+  return "error";
 }
 
-function emitLog(input: {
-  level: "info" | "warn" | "error";
-  message: string;
-  attributes?: Record<string, string | number | boolean | null>;
-  sampleSeed?: string;
-}): void {
-  const shouldKeep =
-    input.level === "warn" ||
-    input.level === "error" ||
-    shouldSampleNonCritical(input.sampleSeed);
+function statusFromError(error: MachineError): number {
+  switch (error._tag) {
+    case "MissingAuthHeader":
+    case "TokenValidationError":
+      return 401;
+    case "BodyParseError":
+      return 400;
+    case "NetworkError":
+      return 503;
+    case "RateLimitError":
+      return 429;
+    case "UpstreamError":
+      return 502;
+  }
+}
 
-  if (!shouldKeep) return;
+function messageFromError(error: MachineError): string {
+  if (
+    error._tag === "TokenValidationError" ||
+    error._tag === "BodyParseError" ||
+    error._tag === "RateLimitError" ||
+    error._tag === "UpstreamError"
+  ) {
+    return error.message;
+  }
+  if (error._tag === "MissingAuthHeader") return "Missing authorization header";
+  return "Network request failed";
+}
+
+function emitCanonicalLog(context: CanonicalContext): void {
+  const level =
+    context.outcome === "success"
+      ? "info"
+      : failureLevel(context.errorType ?? "UpstreamError");
+
+  const durationMs = Date.now() - context.startedAt;
+  const attributes: Record<string, string | number | boolean | null> = {
+    "event.name": "machine.request",
+    "event.kind": "canonical",
+    "machine.request_id": context.requestId,
+    "machine.trace_id": context.traceId ?? null,
+    "machine.outcome": context.outcome,
+    "machine.duration_ms": durationMs,
+    "machine.status": context.httpStatus ?? null,
+    "machine.error_type": context.errorType ?? null,
+    "machine.error_message": context.errorMessage ?? null,
+    "machine.token_validation_status": context.tokenValidationStatus ?? null,
+    "machine.token_valid": context.tokenValid ?? null,
+    "machine.model_id": context.modelId ?? null,
+    "machine.upstream_model": context.upstreamModel ?? null,
+    "machine.provider": context.provider ?? null,
+    "machine.provider_host": context.providerHost ?? null,
+    "machine.upstream_status": context.upstreamStatus ?? null,
+    "machine.stream": context.stream ?? null,
+  };
 
   logger.emit({
-    severityText: input.level.toUpperCase(),
+    severityText: level.toUpperCase(),
     severityNumber:
-      input.level === "error"
+      level === "error"
         ? ERROR_SEVERITY_NUMBER
-        : input.level === "warn"
+        : level === "warn"
           ? WARN_SEVERITY_NUMBER
           : INFO_SEVERITY_NUMBER,
-    body: input.message,
-    attributes: input.attributes,
+    body: "machine.request",
+    attributes,
   });
 }
 
 export abstract class MachineService {
-  // ── Private: Step 1 ───────────────────────────────────────────────
-  // Only retries on NetworkError (transient), never on bad token
   private static validateToken(
     header: BearerHeaders,
+    context: CanonicalContext,
   ): Effect.Effect<
     void,
     MissingAuthHeader | NetworkError | TokenValidationError
   > {
     const span = tracer.startSpan("machine.validate_token");
+    span.setAttribute("machine.request_id", context.requestId);
+
     const effect = Effect.gen(function* () {
       if (!header.authorization?.startsWith("Bearer ")) {
         yield* Effect.fail(new MissingAuthHeader());
@@ -96,16 +166,18 @@ export abstract class MachineService {
       }
 
       const token = header.authorization.replace("Bearer ", "").trim();
-      const tokenHash = hashString(token).toString();
-      span.setAttribute("machine.token_hash", tokenHash);
+      span.setAttribute("machine.token_hash", hashString(token).toString());
 
       const res = yield* Effect.tryPromise({
         try: () =>
-          fetch("https://cautious-platypus-49.convex.site/verify-api-key", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ token }),
-          }),
+          axios.post(
+            "https://cautious-platypus-49.convex.site/verify-api-key",
+            { token },
+            {
+              headers: { "Content-Type": "application/json" },
+              validateStatus: () => true,
+            },
+          ),
         catch: (cause) => new NetworkError({ cause }),
       }).pipe(
         Effect.retry({
@@ -116,31 +188,19 @@ export abstract class MachineService {
         }),
       );
 
-      span.setAttribute("machine.validation_status", res.status);
-      if (!res.ok) {
-        emitLog({
-          level: "warn",
-          message: "Token validation failed",
-          attributes: {
-            "machine.phase": "token_validation",
-            "machine.status": res.status,
-          },
-        });
+      const validationBody = res.data as { valid?: boolean } | undefined;
+      const isTokenValid = validationBody?.valid === true;
 
+      context.tokenValidationStatus = res.status;
+      context.tokenValid = isTokenValid;
+
+      span.setAttribute("machine.validation_status", res.status);
+      if (res.status < 200 || res.status >= 300 || !isTokenValid) {
         yield* new TokenValidationError({
-          message: "Token validation failed",
+          message: "Invalid API key",
           status: res.status,
         });
       }
-
-      emitLog({
-        level: "info",
-        message: "Token validation succeeded",
-        attributes: {
-          "machine.phase": "token_validation",
-        },
-        sampleSeed: tokenHash,
-      });
     });
 
     return effect.pipe(
@@ -162,12 +222,14 @@ export abstract class MachineService {
       ),
     );
   }
-  // ── Private: Step 2 ───────────────────────────────────────────────
-  // Pure validation, no I/O, no retry needed
 
-  private static resolveBody(body: unknown): Effect.Effect<
+  private static resolveBody(
+    body: unknown,
+    context: CanonicalContext,
+  ): Effect.Effect<
     {
       model: string;
+      providerName: string;
       providerurl: string;
       providerkey: string;
       messages: unknown[];
@@ -177,6 +239,8 @@ export abstract class MachineService {
     BodyParseError
   > {
     const span = tracer.startSpan("machine.resolve_body");
+    span.setAttribute("machine.request_id", context.requestId);
+
     const effect = Effect.gen(function* () {
       if (typeof body !== "object" || body === null) {
         yield* Effect.fail(
@@ -186,9 +250,8 @@ export abstract class MachineService {
       }
 
       const b = body as Record<string, unknown>;
-
       if (!b.model) {
-        yield* Effect.fail(new BodyParseError({ message: "Missing model " }));
+        yield* Effect.fail(new BodyParseError({ message: "Missing model" }));
         return undefined as never;
       }
 
@@ -216,11 +279,17 @@ export abstract class MachineService {
         return undefined as never;
       }
 
+      context.modelId = modelID;
+      context.upstreamModel = router.upstreamModel;
+      context.provider = router.provider;
+      context.stream = b.stream === true;
+
       span.setAttribute("machine.model_id", modelID);
       span.setAttribute("machine.provider", router.provider);
 
       return {
         model: router.upstreamModel,
+        providerName: router.provider,
         providerurl: provider.base_url,
         providerkey: provider.api_key,
         messages: (b.messages ?? []) as unknown[],
@@ -239,14 +308,6 @@ export abstract class MachineService {
         Effect.sync(() => {
           span.setStatus({ code: SpanStatusCode.ERROR, message: error._tag });
           span.recordException(new Error(error._tag));
-          emitLog({
-            level: "warn",
-            message: "Request body resolution failed",
-            attributes: {
-              "machine.phase": "resolve_body",
-              "machine.error_type": error._tag,
-            },
-          });
         }),
       ),
       Effect.ensuring(
@@ -257,83 +318,78 @@ export abstract class MachineService {
     );
   }
 
-  // ── Public: the only thing index.ts ever touches ───────────────────
   static handleRequest(
     headers: BearerHeaders,
     body: unknown,
   ): Effect.Effect<Response, MachineError> {
-    const requestSpan = tracer.startSpan("machine.handle_request");
-    const requestSeed = headers.authorization
-      ? hashString(headers.authorization).toString()
-      : undefined;
+    const context: CanonicalContext = {
+      requestId: crypto.randomUUID(),
+      startedAt: Date.now(),
+      outcome: "success",
+    };
 
-    emitLog({
-      level: "info",
-      message: "Machine request received",
-      attributes: {
-        "machine.phase": "request_start",
-      },
-      sampleSeed: requestSeed,
-    });
+    const requestSpan = tracer.startSpan("machine.handle_request");
+    context.traceId = requestSpan.spanContext().traceId;
+    requestSpan.setAttribute("machine.request_id", context.requestId);
+    requestSpan.setAttribute("machine.trace_id", context.traceId);
 
     const effect = Effect.gen(function* () {
-      yield* MachineService.validateToken(headers); // Step 1
-      const resolved = yield* MachineService.resolveBody(body); // Step 2
-      return yield* MachineService.sendUpstream(resolved); // Step 3
+      yield* MachineService.validateToken(headers, context);
+      const resolved = yield* MachineService.resolveBody(body, context);
+      return yield* MachineService.sendUpstream(resolved, context);
     });
 
     return effect.pipe(
       Effect.tap((response) =>
         Effect.sync(() => {
+          context.outcome = "success";
+          context.httpStatus = response.status;
           requestSpan.setAttribute("http.status_code", response.status);
           requestSpan.setStatus({ code: SpanStatusCode.OK });
-          emitLog({
-            level: "info",
-            message: "Machine request completed",
-            attributes: {
-              "machine.phase": "request_end",
-              "machine.status": response.status,
-            },
-            sampleSeed: requestSeed,
-          });
         }),
       ),
       Effect.tapError((error) =>
         Effect.sync(() => {
+          context.outcome = "error";
+          context.errorType = error._tag;
+          context.errorMessage = messageFromError(error);
+          context.httpStatus = statusFromError(error);
+
+          requestSpan.setAttribute("http.status_code", context.httpStatus);
           requestSpan.setStatus({
-            code: SpanStatusCode.ERROR,
+            code:
+              failureLevel(error._tag) === "error"
+                ? SpanStatusCode.ERROR
+                : SpanStatusCode.UNSET,
             message: error._tag,
           });
           requestSpan.recordException(new Error(error._tag));
-          emitLog({
-            level: "error",
-            message: "Machine request failed",
-            attributes: {
-              "machine.phase": "request_end",
-              "machine.error_type": error._tag,
-            },
-          });
         }),
       ),
       Effect.ensuring(
         Effect.sync(() => {
+          emitCanonicalLog(context);
           requestSpan.end();
         }),
       ),
     );
   }
-  // ── Private: Step 3 ───────────────────────────────────────────────
-  // Retries NetworkError with backoff
-  // On RateLimit (429) → switches provider and retries once
-  private static sendUpstream(body: {
-    model: string;
-    providerurl: string;
-    providerkey: string;
-    messages: unknown[];
-    stream: boolean;
-    streamOptions?: unknown;
-  }): Effect.Effect<Response, NetworkError | UpstreamError | RateLimitError> {
+
+  private static sendUpstream(
+    body: {
+      model: string;
+      providerName: string;
+      providerurl: string;
+      providerkey: string;
+      messages: unknown[];
+      stream: boolean;
+      streamOptions?: unknown;
+    },
+    context: CanonicalContext,
+  ): Effect.Effect<Response, NetworkError | UpstreamError | RateLimitError> {
     const span = tracer.startSpan("machine.send_upstream");
+    span.setAttribute("machine.request_id", context.requestId);
+
     const effect = Effect.gen(function* () {
       const { providerurl, providerkey } = body;
       const providerHost = (() => {
@@ -344,27 +400,34 @@ export abstract class MachineService {
         }
       })();
 
+      context.providerHost = providerHost;
+      context.provider = body.providerName;
+      context.stream = body.stream;
+
       span.setAttribute("machine.provider_host", providerHost);
       span.setAttribute("machine.stream", body.stream);
 
       const res = yield* Effect.tryPromise({
         try: () =>
-          fetch(`${providerurl}/chat/completions`, {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${providerkey}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
+          axios.post(
+            `${providerurl}/chat/completions`,
+            {
               model: body.model,
               messages: body.messages,
               stream: body.stream,
               ...(body.streamOptions !== undefined
                 ? { stream_options: body.streamOptions }
                 : {}),
-            }),
-          }),
-
+            },
+            {
+              headers: {
+                authorization: `Bearer ${providerkey}`,
+                "content-type": "application/json",
+              },
+              responseType: "stream",
+              validateStatus: () => true,
+            },
+          ),
         catch: (cause) => new NetworkError({ cause }),
       }).pipe(
         Effect.retry({
@@ -375,46 +438,32 @@ export abstract class MachineService {
         }),
       );
 
+      context.upstreamStatus = res.status;
       span.setAttribute("machine.upstream_status", res.status);
 
-      // rate limited → dedicated error so we can handle provider switching
       if (res.status === 429) {
-        emitLog({
-          level: "warn",
-          message: "Provider rate limited request",
-          attributes: {
-            "machine.phase": "upstream_response",
-            "machine.provider_host": providerHost,
-            "machine.status": res.status,
-          },
-        });
         yield* new RateLimitError({ message: "Rate limited by provider" });
       }
 
-      if (!res.ok) {
-        emitLog({
-          level: "error",
-          message: "Upstream returned non-success status",
-          attributes: {
-            "machine.phase": "upstream_response",
-            "machine.provider_host": providerHost,
-            "machine.status": res.status,
-          },
-        });
+      if (res.status < 200 || res.status >= 300) {
         yield* new UpstreamError({
           message: "Upstream request failed",
           status: res.status,
         });
       }
 
-      const requestId = res.headers.get("x-request-id");
-
-      const passthroughHeaders = new Headers(res.headers);
+      const requestId = res.headers["x-request-id"] as string | undefined;
+      const passthroughHeaders = new Headers(
+        res.headers as Record<string, string>,
+      );
       passthroughHeaders.set("x-accel-buffering", "no");
       passthroughHeaders.set("cache-control", "no-cache");
       if (requestId) passthroughHeaders.set("x-request-id", requestId);
+      if (context.traceId)
+        passthroughHeaders.set("x-trace-id", context.traceId);
+      passthroughHeaders.set("x-machine-request-id", context.requestId);
 
-      return new Response(res.body, {
+      return new Response(res.data as ReadableStream, {
         status: res.status,
         headers: passthroughHeaders,
       });
@@ -430,17 +479,6 @@ export abstract class MachineService {
         Effect.sync(() => {
           span.setStatus({ code: SpanStatusCode.ERROR, message: error._tag });
           span.recordException(new Error(error._tag));
-
-          if (error._tag === "NetworkError") {
-            emitLog({
-              level: "error",
-              message: "Network error while sending upstream request",
-              attributes: {
-                "machine.phase": "upstream_request",
-                "machine.error_type": error._tag,
-              },
-            });
-          }
         }),
       ),
       Effect.ensuring(
