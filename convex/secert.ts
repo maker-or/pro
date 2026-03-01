@@ -20,14 +20,14 @@ export const genrateKey = mutation({
 
     // Try to find the user's organisation
     const org = await ctx.db
-      .query("organisation")
+      .query("organizationMembers")
       .withIndex("by_userId", (q) => q.eq("userId", userId))
       .first();
 
     const { key, publicId, hashsecret } = await createApiKey();
 
     await ctx.db.insert("secretkey", {
-      orgId: org?._id,
+      orgId: org?.orgId,
       userId,
       name: args.name,
       prefix: "sk_live_",

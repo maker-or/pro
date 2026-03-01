@@ -1,14 +1,14 @@
-'use client';
+"use client";
 
-import { ReactNode } from 'react';
-import { SidebarProvider } from '@/components/ui/sidebar';
-import { AppSidebar } from '@/components/app-sidebar';
+import { ReactNode } from "react";
+import { SidebarProvider } from "@/components/ui/sidebar";
+import { AppSidebar } from "@/components/app-sidebar";
 
 export function AuthenticatedLayout({ children }: { children: ReactNode }) {
-  return (
-    <SidebarProvider>
-      <AppSidebar />
-      {children}
-    </SidebarProvider>
-  );
+	return (
+		<SidebarProvider>
+			<AppSidebar />
+			{children}
+		</SidebarProvider>
+	);
 }
