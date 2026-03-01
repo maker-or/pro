@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuth } from "@workos-inc/authkit-nextjs/components";
-import { Home, Key, Settings, User } from "lucide-react";
+import { Home, Key, Settings, Terminal, User } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -38,6 +38,11 @@ const navItems = [
     title: "Profile",
     url: "/profile",
     icon: User,
+  },
+  {
+    title: "Console",
+    url: "/console",
+    icon: Terminal,
   },
 ];
 
