@@ -171,7 +171,7 @@ export abstract class MachineService {
 			const res = yield* Effect.tryPromise({
 				try: () =>
 					axios.post(
-						"https://cautious-platypus-49.convex.site/verify-api-key",
+						"https://keen-guanaco-392.convex.site/verify-api-key",
 						{ token },
 						{
 							headers: { "Content-Type": "application/json" },

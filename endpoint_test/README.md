@@ -14,7 +14,7 @@ Use `environments/local.bru` and set:
 
 - `baseUrl` (default: `http://localhost:3000`)
 - `apiToken` (token/publicId to validate)
-- `convexBaseUrl` (default: `https://cautious-platypus-49.convex.site`)
+- `convexBaseUrl` (default: `https://keen-guanaco-392.convex.site`)
 
 ## Run
 

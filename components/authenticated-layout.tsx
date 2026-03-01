@@ -1,14 +1,16 @@
 "use client";
 
-import { ReactNode } from "react";
-import { SidebarProvider } from "@/components/ui/sidebar";
-import { AppSidebar } from "@/components/app-sidebar";
+import type { ReactNode } from "react";
+import { TopNav } from "@/components/top-nav";
 
 export function AuthenticatedLayout({ children }: { children: ReactNode }) {
 	return (
-		<SidebarProvider>
-			<AppSidebar />
-			{children}
-		</SidebarProvider>
+		<div
+			className="h-svh w-svw grid grid-rows-[auto_1fr] overflow-hidden"
+			style={{ backgroundColor: "#0E0D02" }}
+		>
+			<TopNav />
+			<div className="overflow-y-auto">{children}</div>
+		</div>
 	);
 }
