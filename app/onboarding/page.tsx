@@ -2,9 +2,8 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useMutation } from "convex/react";
 import { useAuth } from "@workos-inc/authkit-nextjs/components";
-import { api } from "@/convex/_generated/api";
+import { createOrganisationAction } from "./actions";
 import { Building2, ArrowRight, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +12,6 @@ import { Label } from "@/components/ui/label";
 export default function OnboardingPage() {
 	const router = useRouter();
 	const { user } = useAuth();
-	const createOrgAndAddAdmin = useMutation(api.org.createOrgAndAddAdmin);
 
 	const [orgName, setOrgName] = useState("");
 	const [isLoading, setIsLoading] = useState(false);
@@ -33,18 +31,15 @@ export default function OnboardingPage() {
 		setIsLoading(true);
 		setError(null);
 
-		try {
-			await createOrgAndAddAdmin({
-				name: trimmed,
-				userId: user.id,
-			});
+		const result = await createOrganisationAction(user.id, trimmed);
 
-			router.push("/");
-		} catch (err) {
-			console.error("[onboarding] failed to create org:", err);
-			setError("Something went wrong. Please try again.");
+		if (!result.success) {
+			setError(result.error);
 			setIsLoading(false);
+			return;
 		}
+
+		router.push("/");
 	};
 
 	return (
